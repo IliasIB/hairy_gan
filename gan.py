@@ -3,10 +3,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tensorflow.nn import conv2d
 from skimage import transform, io
+from sklearn.utils import shuffle
 
 
 def encoder(image):
-    with tf.variable_scope('encoder') as scope:
+    with tf.variable_scope('encoder', reuse=tf.AUTO_REUSE) as scope:
         # Input Layer
         input_layer = tf.reshape(image, [-1, 128, 128, 3])
 
@@ -57,32 +58,29 @@ def encoder(image):
     return average, deviation
 
 
-def generator(average, deviation, sample_dimension):
-    with tf.variable_scope('generator') as scope:
-        # Generate sample
-        sample = np.random.uniform(-1, 1, [1, sample_dimension])
-
-        # Calculate new sample
-        z = average + sample * deviation
+def generator(z, sample_dimension, y, batch_size):
+    with tf.variable_scope('generator', reuse=tf.AUTO_REUSE) as scope:
+        # Concatenate hair style parameter
+        z = tf.concat([z, y], 1)
 
         # Fully connected layer 1
-        w_fc_1 = tf.get_variable('g_wfc1', [sample_dimension, 8064])
+        w_fc_1 = tf.get_variable('g_wfc1', [sample_dimension + 10, 8064])
         b_fc_1 = tf.get_variable('g_bfc1', [8064])
         h_fc_1 = tf.nn.relu(tf.matmul(z, w_fc_1) + b_fc_1)
 
         # Fully connected layer 2
-        w_fc_2 = tf.get_variable('g_wfc2', [8064, 4 * 4 * 72])
-        b_fc_2 = tf.get_variable('g_bfc2', [4 * 4 * 72])
+        w_fc_2 = tf.get_variable('g_wfc2', [8064, 4 * 4 * 504])
+        b_fc_2 = tf.get_variable('g_bfc2', [4 * 4 * 504])
         h_fc_2 = tf.nn.relu(tf.matmul(h_fc_1, w_fc_2) + b_fc_2)
 
         # Hidden Layer
-        hidden_layer = tf.reshape(h_fc_2, [1, 4, 4, 72])
+        hidden_layer = tf.reshape(h_fc_2, [-1, 4, 4, 504])
         hidden_layer = tf.nn.relu(hidden_layer)
 
         # DeConv Layer 1
-        w_conv1 = tf.get_variable('g_wconv1', [3, 3, 288, 72])
+        w_conv1 = tf.get_variable('g_wconv1', [3, 3, 288, 504])
         b_conv1 = tf.get_variable('g_bconv1', [288])
-        h_conv1 = tf.nn.conv2d_transpose(hidden_layer, w_conv1, output_shape=[1, 8, 8, 288],
+        h_conv1 = tf.nn.conv2d_transpose(hidden_layer, w_conv1, output_shape=[batch_size, 8, 8, 288],
                                          strides=[1, 2, 2, 1], padding='SAME') + b_conv1
         h_conv1 = tf.contrib.layers.batch_norm(inputs=h_conv1, scale=True, scope="g_bn1")
         h_conv1 = tf.nn.relu(h_conv1)
@@ -90,7 +88,7 @@ def generator(average, deviation, sample_dimension):
         # DeConv Layer 2
         w_conv2 = tf.get_variable('g_wconv2', [3, 3, 216, 288])
         b_conv2 = tf.get_variable('g_bconv2', [216])
-        h_conv2 = tf.nn.conv2d_transpose(h_conv1, w_conv2, output_shape=[1, 16, 16, 216],
+        h_conv2 = tf.nn.conv2d_transpose(h_conv1, w_conv2, output_shape=[batch_size, 16, 16, 216],
                                          strides=[1, 2, 2, 1], padding='SAME') + b_conv2
         h_conv2 = tf.contrib.layers.batch_norm(inputs=h_conv2, scale=True, scope="g_bn2")
         h_conv2 = tf.nn.relu(h_conv2)
@@ -98,7 +96,7 @@ def generator(average, deviation, sample_dimension):
         # DeConv Layer 3
         w_conv3 = tf.get_variable('g_wconv3', [5, 5, 144, 216])
         b_conv3 = tf.get_variable('g_bconv3', [144])
-        h_conv3 = tf.nn.conv2d_transpose(h_conv2, w_conv3, output_shape=[1, 32, 32, 144],
+        h_conv3 = tf.nn.conv2d_transpose(h_conv2, w_conv3, output_shape=[batch_size, 32, 32, 144],
                                          strides=[1, 2, 2, 1], padding='SAME') + b_conv3
         h_conv3 = tf.contrib.layers.batch_norm(inputs=h_conv3, scale=True, scope="g_bn3")
         h_conv3 = tf.nn.relu(h_conv3)
@@ -106,7 +104,7 @@ def generator(average, deviation, sample_dimension):
         # DeConv Layer 4
         w_conv4 = tf.get_variable('g_wconv4', [5, 5, 72, 144])
         b_conv4 = tf.get_variable('g_bconv4', [72])
-        h_conv4 = tf.nn.conv2d_transpose(h_conv3, w_conv4, output_shape=[1, 64, 64, 72],
+        h_conv4 = tf.nn.conv2d_transpose(h_conv3, w_conv4, output_shape=[batch_size, 64, 64, 72],
                                          strides=[1, 2, 2, 1], padding='SAME') + b_conv4
         h_conv4 = tf.contrib.layers.batch_norm(inputs=h_conv4, scale=True, scope="g_bn4")
         h_conv4 = tf.nn.relu(h_conv4)
@@ -114,14 +112,14 @@ def generator(average, deviation, sample_dimension):
         # DeConv Layer 5
         w_conv5 = tf.get_variable('g_wconv5', [6, 6, 3, 72])
         b_conv5 = tf.get_variable('g_bconv5', [3])
-        h_conv5 = tf.nn.conv2d_transpose(h_conv4, w_conv5, output_shape=[1, 128, 128, 3],
+        h_conv5 = tf.nn.conv2d_transpose(h_conv4, w_conv5, output_shape=[batch_size, 128, 128, 3],
                                          strides=[1, 2, 2, 1], padding='SAME') + b_conv5
         h_conv5 = tf.nn.tanh(h_conv5)
     return h_conv5
 
 
 def discrimator(image):
-    with tf.variable_scope('discriminator') as scope:
+    with tf.variable_scope('discriminator', reuse=tf.AUTO_REUSE) as scope:
         # Convolution Layer 1
         w_conv1 = tf.get_variable('d_wconv1', [6, 6, 3, 64])
         b_conv1 = tf.get_variable('d_bconv1', [64])
@@ -159,30 +157,166 @@ def discrimator(image):
         b_fc = tf.get_variable('d_bfc1', [1])
         h_pool4_flat = tf.reshape(h_pool_4, [-1, 8 * 8 * 256])
         h_fc = tf.matmul(h_pool4_flat, w_fc) + b_fc
-    return h_fc
+    return h_fc, tf.nn.sigmoid(h_fc), h_pool_4
 
 
-def test():
+def recognizer(discriminator, y_size):
+    # Fully connected layer
+    w_fc = tf.get_variable('r_wfc1', [8 * 8 * 256, y_size])
+    b_fc = tf.get_variable('r_bfc1', [y_size])
+    h_pool4_flat = tf.reshape(discriminator, [-1, 8 * 8 * 256])
+    q_y_given_x = tf.nn.softmax(tf.matmul(h_pool4_flat, w_fc) + b_fc)
+
+    return q_y_given_x
+
+
+def train_reconstruction(images, labels):
+    image = tf.placeholder('float32', [None, 128, 128, 3], name="reconstruction_training_image_input")
+    y_input = tf.placeholder('float32', [None, 10], name="reconstruction_training_y_input")
+    average, deviation = encoder(image)
+
+    # Generate sample
+    sample = np.random.uniform(-1, 1, [1, 256])
+    z = average + sample * deviation
+    decoder_f = generator(z, 256, y_input, 64)
+
+    # Encoder loss
+    enc_loss = encoder_loss(average, deviation, decoder_f, image)
+
+    # Standard generator loss
+    fake_logits, fake, discrimator_f = discrimator(decoder_f)
+    g_loss = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=fake_logits, labels=tf.ones_like(fake)
+    )
+
+    # Recognition loss
+    q_y_given_g = recognizer(discrimator_f, 10)
+    cross_ent = tf.reduce_mean(-tf.reduce_sum(tf.log(q_y_given_g + 1e-8) * y_input, 1))
+    ent = tf.reduce_mean(-tf.reduce_sum(tf.log(y_input + 1e-8) * y_input, 1))
+    q_loss = cross_ent + ent
+
+    # Total generator loss
+    g_loss = g_loss + q_loss + enc_loss
+
+    # Variable list
+    tvars = tf.trainable_variables()
+    enc_vars = [var for var in tvars if 'e_' in var.name]
+    g_vars = [var for var in tvars if 'g_' in var.name]
+    q_vars = [var for var in tvars if 'r_' in var.name]
+
+    # Solvers
+    g_solver = tf.train.AdamOptimizer().minimize(g_loss, var_list=g_vars + q_vars)
+    e_solver = tf.train.AdamOptimizer().minimize(enc_loss, var_list=enc_vars + g_vars)
+
+    init = tf.global_variables_initializer()
+
+    # Image iterator
+    image_dataset = tf.data.Dataset.from_tensor_slices(images).batch(64)
+    iterator_data = image_dataset.make_initializable_iterator()
+    image_iterator = iterator_data.get_next()
+
+    # Label iterator
+    label_dataset = tf.data.Dataset.from_tensor_slices(labels).batch(64)
+    iterator_labels = label_dataset.make_initializable_iterator()
+    label_iterator = iterator_labels.get_next()
+
     with tf.Session() as session:
-        img = io.imread('Tenkind/6bald/1.jpg')
-        resized = transform.resize(img, (128, 128, 3))
-        resized = np.reshape(resized, (1, 128, 128, 3))
+        # Run the initializer
+        session.run(init)
 
-        # plt.imshow(resized)
-        # plt.show()
+        for epoch in range(1, 11):
+            print('Epoch:', epoch)
+            session.run(iterator_data.initializer)
+            session.run(iterator_labels.initializer)
 
-        image_input = tf.placeholder('float32', [None, 128, 128, 3], name="image_input")
-        average, deviation = encoder(image_input)
-        sample_image = generator(average, deviation, 256)
+            for i in range(1, int(images.shape[0] / 64) + 1):
+                image_batch = session.run(image_iterator)
+                label_batch = session.run(label_iterator)
+                # _, g_loss_curr = session.run([g_solver, g_loss],
+                #                              feed_dict={image: image_batch, y_input: label_batch})
+                _, e_loss_curr = session.run([e_solver, enc_loss],
+                                             feed_dict={image: image_batch, y_input: label_batch})
+                # print('Generator loss:', g_loss_curr)
+                print('Encoder loss:', e_loss_curr)
+        test(session)
 
-        session.run(tf.global_variables_initializer())
-        generated_image = (session.run(sample_image, feed_dict={image_input: resized}))
 
-        # my_i = generated_image.squeeze()
-        generated_image = np.reshape(generated_image, (128, 128, 3))
-        plt.imshow(generated_image)
-        plt.show()
+def encoder_loss(average, deviation, decoder_f, image):
+    # encode_decode_loss = images * tf.log(epsilon + decoder_f) + (1 - images) * (tf.log(epsilon + 1 - decoder_f))
+    decoder_f = tf.reshape(decoder_f, [64, 128*128*3])
+    image = tf.reshape(image, [64, 128*128*3])
+    encode_decode_loss = tf.nn.sigmoid_cross_entropy_with_logits(logits=decoder_f, labels=image)
+    encode_decode_loss = tf.reduce_sum(encode_decode_loss, 1)
+
+    # Latent space regularization
+    kl_div_loss = 1 + deviation - tf.square(average) - tf.exp(deviation)
+    kl_div_loss = -0.5 * tf.reduce_sum(kl_div_loss, 1)
+
+    # Encoder loss
+    return tf.reduce_mean(encode_decode_loss + kl_div_loss)
+
+
+def train_modification():
+    pass
+
+
+def train_generation():
+    pass
+
+
+def test(session):
+    img = io.imread('Tenkind/6bald/1.jpg')
+    resized = transform.resize(img, (128, 128, 3))
+    resized = np.reshape(resized, (1, 128, 128, 3))
+    y = np.array([1, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=float)
+    y = np.reshape(y, (1, 10))
+
+    # plt.imshow(resized)
+    # plt.show()
+
+    # Inputs
+    image_input = tf.placeholder('float32', [None, 128, 128, 3], name="test_image_input")
+    y_input = tf.placeholder('float32', [None, 10], name="test_y_input")
+
+    # Encode image
+    average, deviation = encoder(image_input)
+
+    # Generate sample
+    sample = np.random.uniform(-1, 1, [1, 256])
+    z = average + sample * deviation
+
+    # Generate image
+    sample_image = generator(z, 256, y_input, 1)
+
+    generated_image = (session.run(sample_image, feed_dict={image_input: resized, y_input: y}))
+
+    generated_image = np.reshape(generated_image, (128, 128, 3))
+    plt.imshow(generated_image)
+    plt.show()
+
+
+def get_training_set():
+    x_train = []
+    y_train = []
+    for i in range(1, 11):
+        images = io.imread_collection('Tenkind/' + str(i) + '*/*.jpg')
+        for j in range(100):
+            try:
+                image = images[j]
+                resized = transform.resize(image, (128, 128, 3))
+                x_train.append(resized)
+                iter_y = np.zeros(10)
+                np.put(iter_y, [i - 1], [1])
+                y_train.append(iter_y)
+            except ValueError as e:
+                print(e)
+            if j % 100 == 0:
+                print('Set ' + str(i) + ': ' + str(j + 100) + ' images loaded')
+
+    return np.array(x_train), np.array(y_train)
 
 
 if __name__ == "__main__":
-    test()
+    x_training, y_training = get_training_set()
+    x_training, y_training = shuffle(x_training, y_training)
+    train_reconstruction(x_training, y_training)
