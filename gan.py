@@ -1,3 +1,6 @@
+import os
+from random import randint, choice
+
 import tensorflow as tf
 import numpy as np
 import matplotlib.pyplot as plt
@@ -64,7 +67,7 @@ def generator(z, sample_dimension, y, batch_size):
         z = tf.concat([z, y], 1)
 
         # Fully connected layer 1
-        w_fc_1 = tf.get_variable('g_wfc1', [sample_dimension + 10, 8064])
+        w_fc_1 = tf.get_variable('g_wfc1', [sample_dimension + 64, 8064])
         b_fc_1 = tf.get_variable('g_bfc1', [8064])
         h_fc_1 = tf.nn.relu(tf.matmul(z, w_fc_1) + b_fc_1)
 
@@ -170,18 +173,18 @@ def recognizer(discriminator, y_size):
     return q_y_given_x
 
 
-def train_reconstruction(images, labels):
+def train_reconstruction(batch_size):
     image = tf.placeholder('float32', [None, 128, 128, 3], name="reconstruction_training_image_input")
-    y_input = tf.placeholder('float32', [None, 10], name="reconstruction_training_y_input")
+    y_input = tf.placeholder('float32', [None, 64], name="reconstruction_training_y_input")
     average, deviation = encoder(image)
 
     # Generate sample
     sample = np.random.uniform(-1, 1, [1, 256])
     z = average + sample * deviation
-    decoder_f = generator(z, 256, y_input, 64)
+    decoder_f = generator(z, 256, y_input, batch_size)
 
     # Encoder loss
-    enc_loss = encoder_loss(average, deviation, decoder_f, image)
+    enc_loss = encoder_loss(average, deviation, decoder_f, image, batch_size)
 
     # Standard generator loss
     fake_logits, fake, discrimator_f = discrimator(decoder_f)
@@ -190,7 +193,7 @@ def train_reconstruction(images, labels):
     )
 
     # Recognition loss
-    q_y_given_g = recognizer(discrimator_f, 10)
+    q_y_given_g = recognizer(discrimator_f, 64)
     cross_ent = tf.reduce_mean(-tf.reduce_sum(tf.log(q_y_given_g + 1e-8) * y_input, 1))
     ent = tf.reduce_mean(-tf.reduce_sum(tf.log(y_input + 1e-8) * y_input, 1))
     q_loss = cross_ent + ent
@@ -210,41 +213,45 @@ def train_reconstruction(images, labels):
 
     init = tf.global_variables_initializer()
 
-    # Image iterator
-    image_dataset = tf.data.Dataset.from_tensor_slices(images).batch(64)
-    iterator_data = image_dataset.make_initializable_iterator()
-    image_iterator = iterator_data.get_next()
-
-    # Label iterator
-    label_dataset = tf.data.Dataset.from_tensor_slices(labels).batch(64)
-    iterator_labels = label_dataset.make_initializable_iterator()
-    label_iterator = iterator_labels.get_next()
-
     with tf.Session() as session:
         # Run the initializer
         session.run(init)
 
-        for epoch in range(1, 11):
+        for epoch in range(1, 51):
             print('Epoch:', epoch)
+
+            x_training, y_training = get_training_set(10)
+            x_training, y_training = shuffle(x_training, y_training)
+
+            # Image iterator
+            image_dataset = tf.data.Dataset.from_tensor_slices(x_training).batch(batch_size)
+            iterator_data = image_dataset.make_initializable_iterator()
+            image_iterator = iterator_data.get_next()
+
+            # Label iterator
+            label_dataset = tf.data.Dataset.from_tensor_slices(y_training).batch(batch_size)
+            iterator_labels = label_dataset.make_initializable_iterator()
+            label_iterator = iterator_labels.get_next()
+
             session.run(iterator_data.initializer)
             session.run(iterator_labels.initializer)
 
-            for i in range(1, int(images.shape[0] / 64) + 1):
+            for i in range(1, int(x_training.shape[0] / batch_size) + 1):
                 image_batch = session.run(image_iterator)
                 label_batch = session.run(label_iterator)
                 # _, g_loss_curr = session.run([g_solver, g_loss],
                 #                              feed_dict={image: image_batch, y_input: label_batch})
                 _, e_loss_curr = session.run([e_solver, enc_loss],
-                                             feed_dict={image: image_batch, y_input: label_batch})
+                                             feed_dict={image: x_training, y_input: y_training})
                 # print('Generator loss:', g_loss_curr)
                 print('Encoder loss:', e_loss_curr)
         test(session)
 
 
-def encoder_loss(average, deviation, decoder_f, image):
+def encoder_loss(average, deviation, decoder_f, image, batch_size):
     # encode_decode_loss = images * tf.log(epsilon + decoder_f) + (1 - images) * (tf.log(epsilon + 1 - decoder_f))
-    decoder_f = tf.reshape(decoder_f, [64, 128*128*3])
-    image = tf.reshape(image, [64, 128*128*3])
+    decoder_f = tf.reshape(decoder_f, [batch_size, 128*128*3])
+    image = tf.reshape(image, [batch_size, 128*128*3])
     encode_decode_loss = tf.nn.sigmoid_cross_entropy_with_logits(logits=decoder_f, labels=image)
     encode_decode_loss = tf.reduce_sum(encode_decode_loss, 1)
 
@@ -265,18 +272,19 @@ def train_generation():
 
 
 def test(session):
-    img = io.imread('Tenkind/6bald/1.jpg')
+    img = io.imread('Tenkind/6/1D-Bald-2.jpg')
     resized = transform.resize(img, (128, 128, 3))
     resized = np.reshape(resized, (1, 128, 128, 3))
-    y = np.array([1, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=float)
-    y = np.reshape(y, (1, 10))
+    y = np.zeros(64, dtype=float)
+    y[0] = 1
+    y = np.reshape(y, (1, 64))
 
     # plt.imshow(resized)
     # plt.show()
 
     # Inputs
     image_input = tf.placeholder('float32', [None, 128, 128, 3], name="test_image_input")
-    y_input = tf.placeholder('float32', [None, 10], name="test_y_input")
+    y_input = tf.placeholder('float32', [None, 64], name="test_y_input")
 
     # Encode image
     average, deviation = encoder(image_input)
@@ -295,28 +303,30 @@ def test(session):
     plt.show()
 
 
-def get_training_set():
+def get_training_set(load_amount):
     x_train = []
     y_train = []
-    for i in range(1, 11):
-        images = io.imread_collection('Tenkind/' + str(i) + '*/*.jpg')
-        for j in range(100):
-            try:
-                image = images[j]
-                resized = transform.resize(image, (128, 128, 3))
+    amount_loaded = 1
+    while amount_loaded <= load_amount:
+        random_folder = randint(0, 63)
+        folder = "/home/ilias/Repositories/hairy_gan/60kind/" + str(random_folder)
+        files = os.listdir(folder)
+        try:
+            image = io.imread(os.path.join(folder, choice(files)))
+            resized = transform.resize(image, (128, 128, 3))
+            if resized.shape == (128, 128, 3):
                 x_train.append(resized)
-                iter_y = np.zeros(10)
-                np.put(iter_y, [i - 1], [1])
+                iter_y = np.zeros(64)
+                np.put(iter_y, [random_folder], [1])
                 y_train.append(iter_y)
-            except ValueError as e:
-                print(e)
-            if j % 100 == 0:
-                print('Set ' + str(i) + ': ' + str(j + 100) + ' images loaded')
+                amount_loaded += 1
+        except ValueError:
+            pass
+        except IOError:
+            pass
 
     return np.array(x_train), np.array(y_train)
 
 
 if __name__ == "__main__":
-    x_training, y_training = get_training_set()
-    x_training, y_training = shuffle(x_training, y_training)
-    train_reconstruction(x_training, y_training)
+    train_reconstruction(10)
