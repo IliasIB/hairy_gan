@@ -173,7 +173,7 @@ def recognizer(discriminator, y_size):
     return q_y_given_x
 
 
-def train_reconstruction(batch_size):
+def train_reconstruction(batch_size, epoch_amount):
     image = tf.placeholder('float32', [None, 128, 128, 3], name="reconstruction_training_image_input")
     y_input = tf.placeholder('float32', [None, 64], name="reconstruction_training_y_input")
     average, deviation = encoder(image)
@@ -212,39 +212,51 @@ def train_reconstruction(batch_size):
     e_solver = tf.train.AdamOptimizer().minimize(enc_loss, var_list=enc_vars + g_vars)
 
     init = tf.global_variables_initializer()
+    config = tf.ConfigProto(
+        # device_count={'GPU': 0}
+    )
 
-    with tf.Session() as session:
+    with tf.Session(config=config) as session:
         # Run the initializer
         session.run(init)
 
-        for epoch in range(1, 51):
+        var_sizes = [np.product(list(map(int, v.shape))) * v.dtype.size
+                     for v in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)]
+        print(sum(var_sizes) / (1024 ** 2), 'MB')
+
+        for epoch in range(1, epoch_amount):
             print('Epoch:', epoch)
 
-            x_training, y_training = get_training_set(10)
+            x_training, y_training = get_training_set(batch_size)
             x_training, y_training = shuffle(x_training, y_training)
 
             # Image iterator
-            image_dataset = tf.data.Dataset.from_tensor_slices(x_training).batch(batch_size)
-            iterator_data = image_dataset.make_initializable_iterator()
-            image_iterator = iterator_data.get_next()
+            # image_dataset = tf.data.Dataset.from_tensor_slices(x_training).batch(batch_size)
+            # iterator_data = image_dataset.make_initializable_iterator()
+            # image_iterator = iterator_data.get_next()
 
             # Label iterator
-            label_dataset = tf.data.Dataset.from_tensor_slices(y_training).batch(batch_size)
-            iterator_labels = label_dataset.make_initializable_iterator()
-            label_iterator = iterator_labels.get_next()
+            # label_dataset = tf.data.Dataset.from_tensor_slices(y_training).batch(batch_size)
+            # iterator_labels = label_dataset.make_initializable_iterator()
+            # label_iterator = iterator_labels.get_next()
+            #
+            # session.run(iterator_data.initializer)
+            # session.run(iterator_labels.initializer)
 
-            session.run(iterator_data.initializer)
-            session.run(iterator_labels.initializer)
-
-            for i in range(1, int(x_training.shape[0] / batch_size) + 1):
-                image_batch = session.run(image_iterator)
-                label_batch = session.run(label_iterator)
-                # _, g_loss_curr = session.run([g_solver, g_loss],
-                #                              feed_dict={image: image_batch, y_input: label_batch})
-                _, e_loss_curr = session.run([e_solver, enc_loss],
-                                             feed_dict={image: x_training, y_input: y_training})
-                # print('Generator loss:', g_loss_curr)
-                print('Encoder loss:', e_loss_curr)
+            # for i in range(1, int(x_training.shape[0] / batch_size) + 1):
+            # image_batch = session.run(image_iterator)
+            # label_batch = session.run(label_iterator)
+            # _, g_loss_curr = session.run([g_solver, g_loss],
+            #                              feed_dict={image: image_batch, y_input: label_batch})
+            _, e_loss_curr = session.run([e_solver, enc_loss],
+                                         feed_dict={image: x_training, y_input: y_training})
+            print('Encoder loss:', e_loss_curr)
+        inputs = {
+                "image_placeholder": image,
+                "y_input_placeholder": y_input,
+        }
+        outputs = {"prediction": q_y_given_g}
+        tf.saved_model.simple_save(session, 'weights/encoder.ckpt', inputs, outputs)
         test(session)
 
 
@@ -329,4 +341,4 @@ def get_training_set(load_amount):
 
 
 if __name__ == "__main__":
-    train_reconstruction(10)
+    train_reconstruction(10, 15000)
