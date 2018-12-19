@@ -164,22 +164,30 @@ def discrimator(image):
 
 
 def recognizer(discriminator, y_size):
-    # Fully connected layer
+    # Fully connected layer for y
     w_fc = tf.get_variable('r_wfc1', [8 * 8 * 256, y_size])
     b_fc = tf.get_variable('r_bfc1', [y_size])
     h_pool4_flat = tf.reshape(discriminator, [-1, 8 * 8 * 256])
     q_y_given_x = tf.nn.softmax(tf.matmul(h_pool4_flat, w_fc) + b_fc)
 
-    return q_y_given_x
+    # Fully connected layer for z
+    w_fc_2 = tf.get_variable('r_wfc2', [8 * 8 * 256, 256])
+    b_fc_2 = tf.get_variable('r_bfc2', [256])
+    h_pool4_flat_2 = tf.reshape(discriminator, [-1, 8 * 8 * 256])
+    q_z_given_x = tf.nn.softmax(tf.matmul(h_pool4_flat, w_fc) + b_fc)
 
+    return q_y_given_x, q_z_given_x
+recognizer
 
 def train_reconstruction(batch_size, epoch_amount):
     image = tf.placeholder('float32', [None, 128, 128, 3], name="reconstruction_training_image_input")
     y_input = tf.placeholder('float32', [None, 64], name="reconstruction_training_y_input")
+    z_rand_input = tf.placeholder('float32', [None, 256], name="reconstruction_training_z_rand_input")
+    y_rand_input = tf.placeholder('float32', [None, 64], name="reconstruction_training_y_rand_input")
     average, deviation = encoder(image)
 
     # Generate sample
-    sample = np.random.uniform(-1, 1, [1, 256])
+    sample = np.random.uniform(-1, 1, [batch_size, 256])
     z = average + sample * deviation
     decoder_f = generator(z, 256, y_input, batch_size)
 
@@ -188,18 +196,84 @@ def train_reconstruction(batch_size, epoch_amount):
 
     # Standard generator loss
     fake_logits, fake, discrimator_f = discrimator(decoder_f)
+    # Calculates the probabilities of fakes labeled as true by the discriminator
     g_loss = tf.nn.sigmoid_cross_entropy_with_logits(
-        logits=fake_logits, labels=tf.ones_like(fake)
+        logits=fake_logits, labels=tf.ones_like(fake_logits)
     )
 
-    # Recognition loss
-    q_y_given_g = recognizer(discrimator_f, 64)
-    cross_ent = tf.reduce_mean(-tf.reduce_sum(tf.log(q_y_given_g + 1e-8) * y_input, 1))
-    ent = tf.reduce_mean(-tf.reduce_sum(tf.log(y_input + 1e-8) * y_input, 1))
-    q_loss = cross_ent + ent
+    
+
+    # Recognition loss for z
+    # Term 1: For image give z
+    _, _, discriminator_f_real = discriminator(image)
+    _, q_z_given_x_real = recognizer(discrimator_f_real, 64)
+    loss_rec_z_1 = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=q_z_given_x_real, labels=tf.ones_like(z)
+    )
+
+    # Term 2: For image give reconstructed z 
+    decoder_f = generator(z, 256, y_input, batch_size)
+    _, _, discriminator_f = discriminator(decoder_f)
+    _, q_z_given_x = recognizer(discriminator_f, 64)
+    loss_rec_z_2 = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=q_z_given_x, labels=tf.ones_like(z)
+    )
+
+    # Term 3: For generated image give reconstructed z
+    decoder_f_rand = generator(z_rand_input, 256, y_input, batch_size)
+    _, _, discriminator_f_rand = discriminator(decoder_f_rand)
+    _, q_z_given_rand_x = recognizer(discrimator_f_rand, 64)
+    loss_rec_z_3 = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=q_z_given_rand_x, labels=tf.ones_like(z_rand_input)
+    )
+
+
+    # Term 4: For image, change hair style and give reconstructed z 
+    decoder_f_mod = generator(z, 256, y_rand_input, batch_size)
+    _, _, discriminator_f_mod = discriminator(decoder_f_mod)
+    _, q_z_given_mod_x = recognizer(discriminator_f_mod, 64)
+    loss_rec_z_4 = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=q_z_given_mod_x, labels=tf.ones_like(z)
+    )
+
+    loss_recognition_z = -loss_rec_z_1 - loss_rec_z_2 - loss_rec_z_3 - loss_rec_z_4
+
+
+    # Recognition loss for y
+    # Term 1: For image, change hair style and give reconstructed hair style
+    decoder_f_mod = generator(z, 256, y_rand_input, batch_size)
+    _, _, discriminator_f_mod = discriminator(decoder_f_mod)
+    q_y_given_mod_x, _ = recognizer(discriminator_f_mod, 64)
+    loss_rec_y_1 = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=q_y_given_mod_x, labels=tf.ones_like(y_rand_input)
+    )
+
+    # Term 2: For image give reconstructed hair style
+    q_y_given_g, _ = recognizer(discrimator_f, 64)
+    loss_rec_y_2 = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=q_y_given_g, labels=tf.ones_like(y_input)
+    )
+
+    # Term 3: For generated image give reconstructed hair style
+    decoder_f_rand = generator(z_rand_input, 256, y_input, batch_size)
+    _, _, discriminator_f_rand = discriminator(decoder_f_rand)
+    q_y_given_rand_x, _ = recognizer(discrimator_f_rand, 64)
+    loss_rec_y_3 = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=q_y_given_rand_x, labels=tf.ones_like(y_rand_input)
+    )
+
+    loss_recognition_y = -loss_rec_y_1 - loss_rec_y_2 - loss_rec_y_3
+
+    # cross_ent = tf.reduce_mean(-tf.reduce_sum(tf.log(q_y_given_g + 1e-8) * y_input, 1))
+    # ent = tf.reduce_mean(-tf.reduce_sum(tf.log(y_input + 1e-8) * y_input, 1))
+    # q_loss = cross_ent + ent
+    q_loss = loss_recognition_z + loss_recognition_y
+
+    # Reconstruction loss for decoder
+    loss_rec_decoder = tf.losses.mean_squared_error(labels=image, predictions=decoder_f)
 
     # Total generator loss
-    g_loss = g_loss + q_loss + enc_loss
+    g_loss = g_loss + q_loss + loss_rec_decoder
 
     # Variable list
     tvars = tf.trainable_variables()
@@ -264,8 +338,8 @@ def encoder_loss(average, deviation, decoder_f, image, batch_size):
     # encode_decode_loss = images * tf.log(epsilon + decoder_f) + (1 - images) * (tf.log(epsilon + 1 - decoder_f))
     decoder_f = tf.reshape(decoder_f, [batch_size, 128*128*3])
     image = tf.reshape(image, [batch_size, 128*128*3])
-    encode_decode_loss = tf.nn.sigmoid_cross_entropy_with_logits(logits=decoder_f, labels=image)
-    encode_decode_loss = tf.reduce_sum(encode_decode_loss, 1)
+    encode_decode_loss = tf.losses.mean_squared_error(labels=image, predictions=decoder_f)
+    # encode_decode_loss = tf.reduce_sum(encode_decode_loss, 1)
 
     # Latent space regularization
     kl_div_loss = 1 + deviation - tf.square(average) - tf.exp(deviation)
