@@ -7,9 +7,11 @@ import matplotlib.pyplot as plt
 from tensorflow.nn import conv2d
 from skimage import transform, io
 from sklearn.utils import shuffle
+from tensorflow.python.saved_model import tag_constants
+from tensorflow.python.tools import inspect_checkpoint as chkp
 
 
-def encoder(image):
+def encoder(image, usage=''):
     with tf.variable_scope('encoder', reuse=tf.AUTO_REUSE) as scope:
         # Input Layer
         input_layer = tf.reshape(image, [-1, 128, 128, 3])
@@ -61,7 +63,7 @@ def encoder(image):
     return average, deviation
 
 
-def generator(z, sample_dimension, y, batch_size):
+def generator(z, sample_dimension, y, batch_size, usage=''):
     with tf.variable_scope('generator', reuse=tf.AUTO_REUSE) as scope:
         # Concatenate hair style parameter
         z = tf.concat([z, y], 1)
@@ -117,11 +119,11 @@ def generator(z, sample_dimension, y, batch_size):
         b_conv5 = tf.get_variable('g_bconv5', [3])
         h_conv5 = tf.nn.conv2d_transpose(h_conv4, w_conv5, output_shape=[batch_size, 128, 128, 3],
                                          strides=[1, 2, 2, 1], padding='SAME') + b_conv5
-        h_conv5 = tf.nn.tanh(h_conv5)
+        h_conv5 = tf.nn.tanh(h_conv5, 'g_tanh')
     return h_conv5
 
 
-def discriminator(image):
+def discriminator(image, usage=''):
     with tf.variable_scope('discriminator', reuse=tf.AUTO_REUSE) as scope:
         # Convolution Layer 1
         w_conv1 = tf.get_variable('d_wconv1', [6, 6, 3, 64])
@@ -163,7 +165,7 @@ def discriminator(image):
     return h_fc, tf.nn.sigmoid(h_fc), h_pool_4
 
 
-def recognizer(discriminator, y_size):
+def recognizer(discriminator, y_size, usage=''):
     with tf.variable_scope('recognizer', reuse=tf.AUTO_REUSE) as scope:
         # Fully connected layer for y
         w_fc = tf.get_variable('r_wfc1', [8 * 8 * 256, y_size])
@@ -179,103 +181,48 @@ def recognizer(discriminator, y_size):
 
     return q_y_given_x, q_z_given_x
 
+
 def train_reconstruction(batch_size, epoch_amount, lambda_1=1, lambda_2=1):
+    # Prediction inputs
     image = tf.placeholder('float32', [None, 128, 128, 3], name="reconstruction_training_image_input")
     y_input = tf.placeholder('float32', [None, 64], name="reconstruction_training_y_input")
     z_rand_input = tf.placeholder('float32', [None, 256], name="reconstruction_training_z_rand_input")
     y_rand_input = tf.placeholder('float32', [None, 64], name="reconstruction_training_y_rand_input")
-    average, deviation = encoder(image)
+    # TODO: Add batch size tensor
 
     # Generate sample
+    average, deviation = encoder(image)
     sample = np.random.uniform(-1, 1, [batch_size, 256])
     z = average + sample * deviation
-    decoder_f = generator(z, 256, y_input, batch_size)
+
+    # Prediction outputs
+    # Reconstruction
+    decoder_f = generator(z, 256, y_input, batch_size, usage='_reconstruction')
+    fake_logits, fake, discriminator_f = discriminator(decoder_f, usage='_reconstruction')
+
+    # Real
+    _, _, discriminator_f_real = discriminator(image, usage='_real_image')
+
+    # Generated
+    decoder_f_rand = generator(z_rand_input, 256, y_input, batch_size, usage='_gen_image')
+    _, _, discriminator_f_rand = discriminator(decoder_f_rand, usage='_gen_image')
+
+    # Modified
+    decoder_f_mod = generator(z, 256, y_rand_input, batch_size, usage='_modify_image')
+    _, _, discriminator_f_mod = discriminator(decoder_f_mod, usage='_modify_image')
 
     # Encoder loss
     enc_loss = encoder_loss(average, deviation, decoder_f, image, batch_size)
 
     # Standard generator loss
-    fake_logits, fake, discriminator_f = discriminator(decoder_f)
     # Calculates the probabilities of fakes labeled as true by the discriminator
     g_loss = tf.nn.sigmoid_cross_entropy_with_logits(
         logits=fake_logits, labels=tf.ones_like(fake_logits)
     )
     g_loss = tf.reduce_mean(g_loss)
-    
 
-    # Recognition loss for z
-    # Term 1: For image give z
-    _, _, discriminator_f_real = discriminator(image)
-    _, q_z_given_x_real = recognizer(discriminator_f_real, 64)
-    loss_rec_z_1 = tf.nn.sigmoid_cross_entropy_with_logits(
-        logits=q_z_given_x_real, labels=tf.ones_like(z)
-    )
-    loss_rec_z_1 = tf.reduce_sum(loss_rec_z_1)
-
-    # Term 2: For image give reconstructed z 
-    decoder_f = generator(z, 256, y_input, batch_size)
-    _, _, discriminator_f = discriminator(decoder_f)
-    _, q_z_given_x = recognizer(discriminator_f, 64)
-    loss_rec_z_2 = tf.nn.sigmoid_cross_entropy_with_logits(
-        logits=q_z_given_x, labels=tf.ones_like(z)
-    )
-    loss_rec_z_2 = tf.reduce_sum(loss_rec_z_2)
-
-    # Term 3: For generated image give reconstructed z
-    decoder_f_rand = generator(z_rand_input, 256, y_input, batch_size)
-    _, _, discriminator_f_rand = discriminator(decoder_f_rand)
-    _, q_z_given_rand_x = recognizer(discriminator_f_rand, 64)
-    loss_rec_z_3 = tf.nn.sigmoid_cross_entropy_with_logits(
-        logits=q_z_given_rand_x, labels=tf.ones_like(z_rand_input)
-    )
-    loss_rec_z_3 = tf.reduce_sum(loss_rec_z_3)
-
-    # Term 4: For image, change hair style and give reconstructed z 
-    decoder_f_mod = generator(z, 256, y_rand_input, batch_size)
-    _, _, discriminator_f_mod = discriminator(decoder_f_mod)
-    _, q_z_given_mod_x = recognizer(discriminator_f_mod, 64)
-    loss_rec_z_4 = tf.nn.sigmoid_cross_entropy_with_logits(
-        logits=q_z_given_mod_x, labels=tf.ones_like(z)
-    )
-    loss_rec_z_4 = tf.reduce_sum(loss_rec_z_4)
-
-    # Recognition loss of z
-    loss_recognition_z = tf.reduce_mean(loss_rec_z_1 + loss_rec_z_2 + loss_rec_z_3 + loss_rec_z_4)
-
-
-    # Recognition loss for y
-    # Term 1: For image, change hair style and give reconstructed hair style
-    decoder_f_mod = generator(z, 256, y_rand_input, batch_size)
-    _, _, discriminator_f_mod = discriminator(decoder_f_mod)
-    q_y_given_mod_x, _ = recognizer(discriminator_f_mod, 64)
-    loss_rec_y_1 = tf.nn.sigmoid_cross_entropy_with_logits(
-        logits=q_y_given_mod_x, labels=tf.ones_like(y_rand_input)
-    )
-    loss_rec_y_1 = tf.reduce_sum(loss_rec_y_1)
-
-    # Term 2: For image give reconstructed hair style
-    q_y_given_g, _ = recognizer(discriminator_f, 64)
-    loss_rec_y_2 = tf.nn.sigmoid_cross_entropy_with_logits(
-        logits=q_y_given_g, labels=tf.ones_like(y_input)
-    )
-    loss_rec_y_2 = tf.reduce_sum(loss_rec_y_2)
-
-    # Term 3: For generated image give reconstructed hair style
-    decoder_f_rand = generator(z_rand_input, 256, y_input, batch_size)
-    _, _, discriminator_f_rand = discriminator(decoder_f_rand)
-    q_y_given_rand_x, _ = recognizer(discriminator_f_rand, 64)
-    loss_rec_y_3 = tf.nn.sigmoid_cross_entropy_with_logits(
-        logits=q_y_given_rand_x, labels=tf.ones_like(y_rand_input)
-    )
-    loss_rec_y_3 = tf.reduce_sum(loss_rec_y_3)
-
-    # Recognition loss of y
-    loss_recognition_y = tf.reduce_mean(loss_rec_y_1 + loss_rec_y_2 + loss_rec_y_3)
-
-    # cross_ent = tf.reduce_mean(-tf.reduce_sum(tf.log(q_y_given_g + 1e-8) * y_input, 1))
-    # ent = tf.reduce_mean(-tf.reduce_sum(tf.log(y_input + 1e-8) * y_input, 1))
-    # q_loss = cross_ent + ent
-    q_loss = loss_recognition_z + loss_recognition_y
+    q_loss = get_recognition_loss(discriminator_f, discriminator_f_mod, discriminator_f_rand, discriminator_f_real,
+                                  y_input, y_rand_input, z, z_rand_input)
 
     # Reconstruction loss for decoder
     loss_rec_decoder = tf.losses.mean_squared_error(labels=image, predictions=decoder_f)
@@ -295,7 +242,7 @@ def train_reconstruction(batch_size, epoch_amount, lambda_1=1, lambda_2=1):
 
     init = tf.global_variables_initializer()
     config = tf.ConfigProto(
-        # device_count={'GPU': 0}
+        device_count={'GPU': 0}
     )
 
     with tf.Session(config=config) as session:
@@ -327,9 +274,63 @@ def train_reconstruction(batch_size, epoch_amount, lambda_1=1, lambda_2=1):
                 "image_placeholder": image,
                 "y_input_placeholder": y_input,
         }
-        outputs = {"prediction": q_y_given_g}
+        outputs = {"decoder": decoder_f}
         tf.saved_model.simple_save(session, 'weights/encoder.ckpt', inputs, outputs)
-        test(session)
+
+
+def get_recognition_loss(discriminator_f, discriminator_f_mod, discriminator_f_rand, discriminator_f_real, y_input,
+                         y_rand_input, z, z_rand_input):
+    # Recognition loss for z
+    # Term 1: For image give z
+    _, q_z_given_x_real = recognizer(discriminator_f_real, 64)
+    loss_rec_z_1 = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=q_z_given_x_real, labels=tf.ones_like(z)
+    )
+    loss_rec_z_1 = tf.reduce_sum(loss_rec_z_1)
+    # Term 2: For image give reconstructed z
+    _, q_z_given_x = recognizer(discriminator_f, 64)
+    loss_rec_z_2 = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=q_z_given_x, labels=tf.ones_like(z)
+    )
+    loss_rec_z_2 = tf.reduce_sum(loss_rec_z_2)
+    # Term 3: For generated image give reconstructed z
+    _, q_z_given_rand_x = recognizer(discriminator_f_rand, 64)
+    loss_rec_z_3 = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=q_z_given_rand_x, labels=tf.ones_like(z_rand_input)
+    )
+    loss_rec_z_3 = tf.reduce_sum(loss_rec_z_3)
+    # Term 4: For image, change hair style and give reconstructed z
+    _, q_z_given_mod_x = recognizer(discriminator_f_mod, 64)
+    loss_rec_z_4 = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=q_z_given_mod_x, labels=tf.ones_like(z)
+    )
+    loss_rec_z_4 = tf.reduce_sum(loss_rec_z_4)
+    # Recognition loss of z
+    loss_recognition_z = tf.reduce_mean(loss_rec_z_1 + loss_rec_z_2 + loss_rec_z_3 + loss_rec_z_4)
+    # Recognition loss for y
+    # Term 1: For image, change hair style and give reconstructed hair style
+    q_y_given_mod_x, _ = recognizer(discriminator_f_mod, 64)
+    loss_rec_y_1 = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=q_y_given_mod_x, labels=tf.ones_like(y_rand_input)
+    )
+    loss_rec_y_1 = tf.reduce_sum(loss_rec_y_1)
+    # Term 2: For image give reconstructed hair style
+    q_y_given_g, _ = recognizer(discriminator_f, 64)
+    loss_rec_y_2 = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=q_y_given_g, labels=tf.ones_like(y_input)
+    )
+    loss_rec_y_2 = tf.reduce_sum(loss_rec_y_2)
+    # Term 3: For generated image give reconstructed hair style
+    q_y_given_rand_x, _ = recognizer(discriminator_f_rand, 64)
+    loss_rec_y_3 = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=q_y_given_rand_x, labels=tf.ones_like(y_rand_input)
+    )
+    loss_rec_y_3 = tf.reduce_sum(loss_rec_y_3)
+    # Recognition loss of y
+    loss_recognition_y = tf.reduce_mean(loss_rec_y_1 + loss_rec_y_2 + loss_rec_y_3)
+    # Total recognition loss
+    q_loss = loss_recognition_z + loss_recognition_y
+    return q_loss
 
 
 def encoder_loss(average, deviation, decoder_f, image, batch_size):
@@ -355,36 +356,54 @@ def train_generation():
     pass
 
 
-def test(session):
-    img = io.imread('Tenkind/6/1D-Bald-2.jpg')
-    resized = transform.resize(img, (128, 128, 3))
-    resized = np.reshape(resized, (1, 128, 128, 3))
-    y = np.zeros(64, dtype=float)
-    y[0] = 1
-    y = np.reshape(y, (1, 64))
+def test():
+    restored_graph = tf.Graph()
+    with restored_graph.as_default():
+        with tf.Session() as session:
+            tf.saved_model.loader.load(
+                session,
+                [tag_constants.SERVING],
+                'weights/encoder.ckpt/',
+            )
 
-    # plt.imshow(resized)
-    # plt.show()
+            test = [n.name for n in tf.get_default_graph().as_graph_def().node]
+            for testt in test:
+                print(testt)
 
-    # Inputs
-    image_input = tf.placeholder('float32', [None, 128, 128, 3], name="test_image_input")
-    y_input = tf.placeholder('float32', [None, 64], name="test_y_input")
+            image_input = restored_graph.get_tensor_by_name('reconstruction_training_image_input:0')
+            y_input = restored_graph.get_tensor_by_name('reconstruction_training_y_input:0')
 
-    # Encode image
-    average, deviation = encoder(image_input)
+            decoder = restored_graph.get_tensor_by_name('generator/g_tanh:0')
 
-    # Generate sample
-    sample = np.random.uniform(-1, 1, [1, 256])
-    z = average + sample * deviation
+            # # Inputs
+            # image_input = tf.placeholder('float32', [None, 128, 128, 3], name="test_image_input")
+            # y_input = tf.placeholder('float32', [None, 64], name="test_y_input")
+            #
+            # # Encode image
+            # average, deviation = encoder(image_input)
+            #
+            # # Generate sample
+            # sample = np.random.uniform(-1, 1, [1, 256])
+            # z = average + sample * deviation
+            #
+            # # Generate image
+            # sample_image = generator(z, 256, y_input, 1)
 
-    # Generate image
-    sample_image = generator(z, 256, y_input, 1)
+            img = io.imread('Tenkind/6/1D-Bald-2.jpg')
+            resized = transform.resize(img, (128, 128, 3))
+            resized = np.reshape(resized, (1, 128, 128, 3)) * 255
+            y = np.zeros(64, dtype=float)
+            y[0] = 1
+            y = np.reshape(y, (1, 64))
 
-    generated_image = (session.run(sample_image, feed_dict={image_input: resized, y_input: y}))
+            # plt.imshow(resized)
+            # plt.show()
 
-    generated_image = np.reshape(generated_image, (128, 128, 3))
-    plt.imshow(generated_image)
-    plt.show()
+            generated_image = (session.run(decoder, feed_dict={image_input: resized, y_input: y}))
+
+            generated_image = np.reshape(generated_image, (128, 128, 3)) / 255
+            plt.imshow(generated_image)
+            plt.show()
 
 
 def get_training_set(load_amount):
@@ -413,4 +432,5 @@ def get_training_set(load_amount):
 
 
 if __name__ == "__main__":
-    train_reconstruction(10, 2000)
+    train_reconstruction(10, 6000)
+    test()
