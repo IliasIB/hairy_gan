@@ -270,6 +270,8 @@ def train_reconstruction(batch_size, epoch_amount, lambda_1=1, lambda_2=1):
                                          feed_dict={image: x_training, y_input: y_training})
             print('Encoder loss:', e_loss_curr)
             # print('Test loss:', test)
+
+            single_test(session, decoder_f, image, y_input, batch_size)
         inputs = {
                 "image_placeholder": image,
                 "y_input_placeholder": y_input,
@@ -356,7 +358,17 @@ def train_generation():
     pass
 
 
-def test():
+def single_test(session, decoder, image_input, y_input, batch_size):
+    x_training, y_training = get_training_set(batch_size)
+    generated_image = (session.run(decoder, feed_dict={image_input: x_training, y_input: y_training}))
+    generated_image = (generated_image[0] + 1)/2 * 255
+    generated_image = np.uint8(generated_image)
+    generated_image = np.clip(generated_image, 0, 255)
+    plt.imshow(generated_image)
+    plt.show()
+
+
+def test(batch_size):
     restored_graph = tf.Graph()
     with restored_graph.as_default():
         with tf.Session() as session:
@@ -365,10 +377,6 @@ def test():
                 [tag_constants.SERVING],
                 'weights/encoder.ckpt/',
             )
-
-            test = [n.name for n in tf.get_default_graph().as_graph_def().node]
-            for testt in test:
-                print(testt)
 
             image_input = restored_graph.get_tensor_by_name('reconstruction_training_image_input:0')
             y_input = restored_graph.get_tensor_by_name('reconstruction_training_y_input:0')
@@ -389,21 +397,27 @@ def test():
             # # Generate image
             # sample_image = generator(z, 256, y_input, 1)
 
-            img = io.imread('Tenkind/6/1D-Bald-2.jpg')
-            resized = transform.resize(img, (128, 128, 3))
-            resized = np.reshape(resized, (1, 128, 128, 3)) * 255
-            y = np.zeros(64, dtype=float)
-            y[0] = 1
-            y = np.reshape(y, (1, 64))
+            # img = io.imread('Tenkind/6/1D-Bald-2.jpg')
+            # resized = transform.resize(img, (128, 128, 3))
+            # resized = np.reshape(resized, (1, 128, 128, 3)) * 255
+            # y = np.zeros(64, dtype=float)
+            # y[0] = 1
+            # y = np.reshape(y, (1, 64))
 
-            # plt.imshow(resized)
-            # plt.show()
+            for i in range(10):
+                x_test, y_test = get_training_set(batch_size)
 
-            generated_image = (session.run(decoder, feed_dict={image_input: resized, y_input: y}))
-
-            generated_image = np.reshape(generated_image, (128, 128, 3)) / 255
-            plt.imshow(generated_image)
-            plt.show()
+                generated_image = (session.run(decoder, feed_dict={image_input: x_test, y_input: y_test}))
+                generated_image = (generated_image[0] + 1) / 2 * 255
+                generated_image = np.uint8(generated_image)
+                generated_image = np.clip(generated_image, 0, 255)
+                x_test = (x_test[0] + 1) / 2 * 255
+                x_test = np.uint8(x_test)
+                x_test = np.clip(x_test, 0, 255)
+                plt.imshow(x_test)
+                plt.show()
+                plt.imshow(generated_image)
+                plt.show()
 
 
 def get_training_set(load_amount):
@@ -418,7 +432,7 @@ def get_training_set(load_amount):
             image = io.imread(os.path.join(folder, random.choice(files)))
             resized = transform.resize(image, (128, 128, 3))
             if resized.shape == (128, 128, 3):
-                x_train.append(resized * 255)
+                x_train.append((resized - 0.5) * 2)
                 iter_y = np.zeros(64)
                 np.put(iter_y, [random_folder], [1])
                 y_train.append(iter_y)
@@ -432,5 +446,5 @@ def get_training_set(load_amount):
 
 
 if __name__ == "__main__":
-    train_reconstruction(10, 6000)
-    test()
+    # train_reconstruction(10, 5)
+    test(10)
