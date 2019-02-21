@@ -4,7 +4,6 @@ import random
 import tensorflow as tf
 import numpy as np
 import matplotlib.pyplot as plt
-from tensorflow.nn import conv2d
 from skimage import transform, io
 from sklearn.utils import shuffle
 from tensorflow.python.saved_model import tag_constants
@@ -92,6 +91,7 @@ def generator(z, attrs):
         with tf.variable_scope('conv4'):
             g_deconv_4 = tf.layers.conv2d_transpose(g_deconv_3, 3, (5, 5), (1, 1), 'same')
             g_image = tf.tanh(g_deconv_4)
+            print(g_image)
 
     return g_image
 
@@ -227,7 +227,7 @@ def train_reconstruction(batch_size, iteration_amount, epoch_amount):
 
     init = tf.global_variables_initializer()
     config = tf.ConfigProto(
-        device_count={'GPU': 0}
+        # device_count={'GPU': 0}
     )
 
     with tf.Session(config=config) as session:
@@ -251,7 +251,7 @@ def train_reconstruction(batch_size, iteration_amount, epoch_amount):
                 "image_placeholder": image,
                 "y_input_placeholder": y_input,
             }
-            outputs = {"decoder": decoder_encoded}
+            outputs = {"decoder": decoded_image}
             tf.saved_model.simple_save(session, 'weights/epoch-' + str(epoch), inputs, outputs)
 
 
@@ -338,7 +338,7 @@ def test(batch_size):
             image_input = restored_graph.get_tensor_by_name('reconstruction_training_image_input:0')
             y_input = restored_graph.get_tensor_by_name('reconstruction_training_y_input:0')
 
-            decoder = restored_graph.get_tensor_by_name('generator/g_tanh:0')
+            decoder = restored_graph.get_tensor_by_name('generator/conv4/Tanh:0')
 
             for i in range(10):
                 x_test, y_test = get_training_set(batch_size)
@@ -382,5 +382,5 @@ def get_training_set(load_amount):
 
 
 if __name__ == "__main__":
-    train_reconstruction(10, 9000, 6)
-    # test(5)
+    train_reconstruction(10, 3000, 6)
+    # test(10)
