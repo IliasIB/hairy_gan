@@ -91,7 +91,6 @@ def generator(z, attrs):
         with tf.variable_scope('conv4'):
             g_deconv_4 = tf.layers.conv2d_transpose(g_deconv_3, 3, (5, 5), (1, 1), 'same')
             g_image = tf.tanh(g_deconv_4)
-            print(g_image)
 
     return g_image
 
@@ -171,7 +170,7 @@ def recognizer(image, y_size):
     return y, f
 
 
-def train_reconstruction(batch_size, iteration_amount, epoch_amount):
+def train_reconstruction(batch_size, iteration_amount, epoch_amount, retrain_path=""):
     # Prediction inputs
     image = tf.placeholder('float32', [None, 128, 128, 3], name="reconstruction_training_image_input")
     y_input = tf.placeholder('float32', [None, 10], name="reconstruction_training_y_input")
@@ -186,25 +185,31 @@ def train_reconstruction(batch_size, iteration_amount, epoch_amount):
     # Encoded
     decoded_image = generator(z, y_input)
     discriminator_decoded_image, discriminator_decoded_f = discriminator(decoded_image)
-    recognizer_decoded_image, recognizer_decoded_f = recognizer(decoded_image, 10)
+    recognizer_decoded_image, recognizer_decoded_f = recognizer(decoded_image, 11)
 
     # Real
     discriminator_real_image, discriminator_real_f = discriminator(image)
-    recognizer_real_image, recognizer_real_f = recognizer(image, 10)
+    recognizer_real_image, recognizer_real_f = recognizer(image, 11)
 
     # Random
     decoded_random = generator(z_rand_input, y_input)
     discriminator_random_image, discriminator_random_f = discriminator(decoded_random)
-    recognizer_random_image, recognizer_random_f = recognizer(decoded_random, 10)
+    recognizer_random_image, recognizer_random_f = recognizer(decoded_random, 11)
+
+    # Recognizer help
+    recognizer_real_aug = tf.concat((y_input, tf.zeros((tf.shape(y_input)[0], 1))), axis=1)
+    recognizer_other = tf.concat((tf.zeros_like(y_input),
+                                  tf.ones((tf.shape(y_input)[0], 1))), axis=1)
 
     # Loss
+    enc_loss = get_encoder_loss(decoded_image, image)
     kl_loss = get_kl_loss(average, deviation)
-    g_loss = get_generator_loss(image, decoded_image, discriminator_real_f, discriminator_decoded_f,
-                                recognizer_real_f, recognizer_decoded_f)
+    g_loss = get_generator_loss(discriminator_decoded_image, discriminator_random_image,
+                                recognizer_decoded_image, recognizer_random_image,
+                                recognizer_real_aug)
     d_loss = get_discriminator_loss(discriminator_real_image, discriminator_decoded_image, discriminator_random_image)
-    q_loss = get_recognizer_loss(recognizer_real_image, recognizer_decoded_image)
-    gd_loss = get_discriminator_feature_matching_loss(discriminator_real_f, discriminator_decoded_f)
-    gq_loss = get_recognizer_feature_matching_loss(discriminator_real_f, discriminator_decoded_f)
+    q_loss = get_recognizer_loss(recognizer_real_image, recognizer_decoded_image, recognizer_random_image,
+                                 recognizer_real_aug, recognizer_other)
 
     # Variable list
     enc_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='encoder')
@@ -212,16 +217,9 @@ def train_reconstruction(batch_size, iteration_amount, epoch_amount):
     q_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='recognizer')
     d_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='discriminator')
 
-    # Weights
-    lambda_1 = 3
-    lambda_2 = 1
-    lambda_3 = 1e-3
-    lambda_4 = 1e-3
-
     # Solvers
-    e_solver = tf.train.AdamOptimizer(2e-4).minimize(lambda_2 * g_loss + lambda_1 * kl_loss, var_list=enc_vars)
-    g_solver = tf.train.AdamOptimizer(2e-4).minimize(lambda_2 * g_loss +
-                                                     lambda_3 * gd_loss + lambda_4 * gq_loss, var_list=g_vars)
+    e_solver = tf.train.AdamOptimizer(2e-4).minimize(enc_loss + kl_loss, var_list=enc_vars)
+    g_solver = tf.train.AdamOptimizer(2e-4).minimize(g_loss + enc_loss, var_list=g_vars)
     d_solver = tf.train.AdamOptimizer(2e-4).minimize(d_loss, var_list=d_vars)
     q_solver = tf.train.AdamOptimizer(2e-4).minimize(q_loss, var_list=q_vars)
 
@@ -234,6 +232,13 @@ def train_reconstruction(batch_size, iteration_amount, epoch_amount):
         # Run the initializer
         session.run(init)
 
+        if retrain_path != "":
+            tf.saved_model.loader.load(
+                session,
+                [tag_constants.SERVING],
+                'weights_bak/epoch-5/',
+            )
+
         # Epochs
         for epoch in range(epoch_amount):
             for iteration in range(1, iteration_amount):
@@ -245,8 +250,7 @@ def train_reconstruction(batch_size, iteration_amount, epoch_amount):
                                          feed_dict={image: x_training, y_input: y_training, z_rand_input: sample_z})
                 # output_loss(d_loss, enc_loss, g_loss, image, kl_loss, q_loss, sample_z, session, x_training, y_input,
                 #             y_training, z_rand_input)
-
-            # single_test(session, decoder_encoded, image, y_input, batch_size)
+            single_test(session, decoded_image, image, y_input, batch_size, epoch)
             inputs = {
                 "image_placeholder": image,
                 "y_input_placeholder": y_input,
@@ -268,26 +272,23 @@ def output_loss(d_loss, enc_loss, g_loss, image, kl_loss, q_loss, sample_z, sess
 
 def get_encoder_loss(decoder_encoded, image):
     # Encoder loss
-    encode_decode_loss = 0.5 * tf.losses.mean_squared_error(labels=image, predictions=decoder_encoded)
+    encode_decode_loss = 0.5 * tf.reduce_mean(tf.reduce_sum(tf.squared_difference(image, decoder_encoded), axis=[1, 2, 3]))
     return encode_decode_loss
 
 
 def get_kl_loss(average, deviation):
     # Latent space regularization
-    kl_div_loss = 1 + deviation - tf.square(average) - tf.exp(deviation)
-    kl_div_loss = -0.5 * tf.reduce_sum(kl_div_loss, 1)
-
-    return tf.reduce_mean(kl_div_loss)
+    kl_div_loss = tf.reduce_mean(-0.5 * tf.reduce_sum(1.0 + deviation - tf.square(average) - tf.exp(deviation), axis=-1))
+    return kl_div_loss
 
 
-def get_generator_loss(real_image, decoded_image, discriminator_real_f, discriminator_decoded_f,
-                       recognizer_real_f, recognizer_decoded_f):
-    g_loss = 0.5 * tf.reduce_mean(tf.reduce_sum(tf.squared_difference(real_image,
-                                                                      decoded_image), axis=[1, 2, 3]))
-    g_loss += 0.5 * tf.reduce_mean(tf.reduce_sum(tf.squared_difference(discriminator_real_f,
-                                                                       discriminator_decoded_f), axis=[1]))
-    g_loss += 0.5 * tf.reduce_mean(tf.reduce_sum(tf.squared_difference(recognizer_real_f,
-                                                                       recognizer_decoded_f), axis=[1]))
+def get_generator_loss(discriminator_decoded_image, discriminator_random_image,
+                       recognizer_decoded_image, recognizer_random_image,
+                       recognizer_real_aug):
+    g_loss = tf.losses.sigmoid_cross_entropy(tf.ones_like(discriminator_decoded_image), discriminator_decoded_image)
+    g_loss += tf.losses.sigmoid_cross_entropy(tf.ones_like(discriminator_random_image), discriminator_random_image)
+    g_loss += tf.losses.softmax_cross_entropy(recognizer_real_aug, recognizer_decoded_image)
+    g_loss += tf.losses.softmax_cross_entropy(recognizer_real_aug, recognizer_random_image)
     return g_loss
 
 
@@ -298,31 +299,21 @@ def get_discriminator_loss(discriminator_real_image, discriminator_decoded_image
     return d_loss
 
 
-def get_recognizer_loss(recognizer_real_image, recognizer_decoded_image):
-    q_loss = tf.losses.softmax_cross_entropy(recognizer_real_image, recognizer_decoded_image)
+def get_recognizer_loss(recognizer_real_image, recognizer_decoded_image, recognizer_random_image,
+                        recognizer_real_aug, recognizer_other):
+    q_loss = tf.losses.softmax_cross_entropy(recognizer_real_aug, recognizer_real_image)
+    q_loss += tf.losses.softmax_cross_entropy(recognizer_other, recognizer_decoded_image)
+    q_loss += tf.losses.softmax_cross_entropy(recognizer_other, recognizer_random_image)
     return q_loss
 
 
-def get_discriminator_feature_matching_loss(discriminator_real_f, discriminator_decoded_f):
-    expected_real_features = tf.reduce_mean(discriminator_real_f, axis=0)
-    expected_fake_features = tf.reduce_mean(discriminator_decoded_f, axis=0)
-    return 0.5 * tf.losses.mean_squared_error(expected_real_features, expected_fake_features)
-
-
-def get_recognizer_feature_matching_loss(recognizer_real_f, recognizer_decoded_f):
-    expected_real_features = tf.reduce_mean(recognizer_real_f, axis=0)
-    expected_fake_features = tf.reduce_mean(recognizer_decoded_f, axis=0)
-    return 0.5 * tf.losses.mean_squared_error(expected_real_features, expected_fake_features)
-
-
-def single_test(session, decoder, image_input, y_input, batch_size):
+def single_test(session, decoder, image_input, y_input, batch_size, epoch):
     x_training, y_training = get_training_set(batch_size)
     generated_image = (session.run(decoder, feed_dict={image_input: x_training, y_input: y_training}))
     generated_image = (generated_image[0] + 1) / 2 * 255
     generated_image = np.uint8(generated_image)
     generated_image = np.clip(generated_image, 0, 255)
-    plt.imshow(generated_image)
-    plt.show()
+    io.imsave('results/epoch-' + str(epoch) + '.png', generated_image)
 
 
 def test(batch_size):
@@ -335,15 +326,16 @@ def test(batch_size):
                 'weights/epoch-5/',
             )
 
-            image_input = restored_graph.get_tensor_by_name('reconstruction_training_image_input:0')
+            image_input = restored_graph.get_tensor_by_name('reconstruction_training_z_rand_input:0')
             y_input = restored_graph.get_tensor_by_name('reconstruction_training_y_input:0')
 
-            decoder = restored_graph.get_tensor_by_name('generator/conv4/Tanh:0')
+            decoder = restored_graph.get_tensor_by_name('generator_1/conv4/Tanh:0')
 
             for i in range(10):
                 x_test, y_test = get_training_set(batch_size)
+                sample = np.random.uniform(-1, 1, [batch_size, 256])
 
-                generated_image = (session.run(decoder, feed_dict={image_input: x_test, y_input: y_test}))
+                generated_image = (session.run(decoder, feed_dict={image_input: sample, y_input: y_test}))
                 generated_image = (generated_image[0] + 1) / 2 * 255
                 generated_image = np.uint8(generated_image)
                 generated_image = np.clip(generated_image, 0, 255)
@@ -382,5 +374,5 @@ def get_training_set(load_amount):
 
 
 if __name__ == "__main__":
-    train_reconstruction(10, 3000, 6)
-    # test(10)
+    # train_reconstruction(10, 3000, 28)
+    test(10)
