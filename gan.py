@@ -170,31 +170,32 @@ def recognizer(image, y_size):
     return y, f
 
 
-def train_reconstruction(batch_size, iteration_amount, epoch_amount, retrain_path=""):
+def train_reconstruction(batch_size, iteration_amount, epoch_amount):
     # Prediction inputs
-    image = tf.placeholder('float32', [None, 128, 128, 3], name="reconstruction_training_image_input")
-    y_input = tf.placeholder('float32', [None, 10], name="reconstruction_training_y_input")
-    z_rand_input = tf.placeholder('float32', [None, 256], name="reconstruction_training_z_rand_input")
+    image = tf.placeholder('float32', [None, 128, 128, 3], name="image_input")
+    y_input = tf.placeholder('float32', [None, 3], name="y_input")
+    decoder_y_input = tf.placeholder('float32', [None, 3], name="decoder_y_input")
+    z_rand_input = tf.placeholder('float32', [None, 256], name="z_rand_input")
 
     # Generate sample
-    average, deviation = encoder(image, y_input, 10)
+    average, deviation = encoder(image, y_input, 3)
     sample = np.random.uniform(-1, 1, [batch_size, 256])
     z = average + sample * deviation
 
     # Prediction outputs
     # Encoded
-    decoded_image = generator(z, y_input)
+    decoded_image = generator(z, decoder_y_input)
     discriminator_decoded_image, discriminator_decoded_f = discriminator(decoded_image)
-    recognizer_decoded_image, recognizer_decoded_f = recognizer(decoded_image, 11)
+    recognizer_decoded_image, recognizer_decoded_f = recognizer(decoded_image, 4)
 
     # Real
     discriminator_real_image, discriminator_real_f = discriminator(image)
-    recognizer_real_image, recognizer_real_f = recognizer(image, 11)
+    recognizer_real_image, recognizer_real_f = recognizer(image, 4)
 
     # Random
-    decoded_random = generator(z_rand_input, y_input)
+    decoded_random = generator(z_rand_input, decoder_y_input)
     discriminator_random_image, discriminator_random_f = discriminator(decoded_random)
-    recognizer_random_image, recognizer_random_f = recognizer(decoded_random, 11)
+    recognizer_random_image, recognizer_random_f = recognizer(decoded_random, 4)
 
     # Recognizer help
     recognizer_real_aug = tf.concat((y_input, tf.zeros((tf.shape(y_input)[0], 1))), axis=1)
@@ -232,13 +233,6 @@ def train_reconstruction(batch_size, iteration_amount, epoch_amount, retrain_pat
         # Run the initializer
         session.run(init)
 
-        if retrain_path != "":
-            tf.saved_model.loader.load(
-                session,
-                [tag_constants.SERVING],
-                'weights_bak/epoch-5/',
-            )
-
         # Epochs
         for epoch in range(epoch_amount):
             for iteration in range(1, iteration_amount):
@@ -247,16 +241,58 @@ def train_reconstruction(batch_size, iteration_amount, epoch_amount, retrain_pat
                 x_training, y_training = shuffle(x_training, y_training)
                 sample_z = np.random.uniform(-1, 1, [batch_size, 256])
                 _, _, _, _ = session.run([e_solver, g_solver, d_solver, q_solver],
-                                         feed_dict={image: x_training, y_input: y_training, z_rand_input: sample_z})
+                                         feed_dict={image: x_training, y_input: y_training, z_rand_input: sample_z,
+                                                    decoder_y_input: y_training})
                 # output_loss(d_loss, enc_loss, g_loss, image, kl_loss, q_loss, sample_z, session, x_training, y_input,
                 #             y_training, z_rand_input)
-            single_test(session, decoded_image, image, y_input, batch_size, epoch)
+            single_test(session, decoded_image, image, y_input, decoder_y_input, batch_size, epoch)
+            single_random_test(session, decoded_random, z_rand_input, y_input, decoder_y_input, batch_size, epoch)
             inputs = {
                 "image_placeholder": image,
                 "y_input_placeholder": y_input,
             }
             outputs = {"decoder": decoded_image}
             tf.saved_model.simple_save(session, 'weights/epoch-' + str(epoch), inputs, outputs)
+
+
+def continue_training(batch_size, iteration_amount, epoch_amount, weights="weights_bak/epoch-27"):
+    restored_graph = tf.Graph()
+    with restored_graph.as_default():
+        with tf.Session() as session:
+            tf.saved_model.loader.load(
+                session,
+                [tag_constants.SERVING],
+                weights,
+            )
+
+            e_solver = restored_graph.get_operation_by_name("Adam")
+            g_solver = restored_graph.get_operation_by_name("Adam_1")
+            d_solver = restored_graph.get_operation_by_name("Adam_2")
+            q_solver = restored_graph.get_operation_by_name("Adam_3")
+
+            image = restored_graph.get_tensor_by_name('image_input:0')
+            y_input = restored_graph.get_tensor_by_name('y_input:0')
+            decoder_y_input = restored_graph.get_tensor_by_name('decoder_y_input:0')
+            z_rand_input = restored_graph.get_tensor_by_name('z_rand_input:0')
+            decoded_image = restored_graph.get_tensor_by_name('generator/conv4/Tanh:0')
+            decoded_random = restored_graph.get_tensor_by_name('generator_1/conv4/Tanh:0')
+
+            # Epochs
+            for epoch in range(epoch_amount):
+                for iteration in range(1, iteration_amount):
+                    x_training, y_training = get_training_set(batch_size)
+                    x_training, y_training = shuffle(x_training, y_training)
+                    sample_z = np.random.uniform(-1, 1, [batch_size, 256])
+                    _, _, _, _ = session.run([e_solver, g_solver, d_solver, q_solver],
+                                             feed_dict={image: x_training, y_input: y_training, z_rand_input: sample_z})
+                single_test(session, decoded_image, image, y_input, decoder_y_input, batch_size, epoch)
+                single_random_test(session, decoded_random, z_rand_input, y_input, decoder_y_input, batch_size, epoch)
+                inputs = {
+                    "image_placeholder": image,
+                    "y_input_placeholder": y_input,
+                }
+                outputs = {"decoder": decoded_image}
+                tf.saved_model.simple_save(session, 'weights/epoch-' + str(epoch), inputs, outputs)
 
 
 def output_loss(d_loss, enc_loss, g_loss, image, kl_loss, q_loss, sample_z, session, x_training, y_input, y_training,
@@ -307,13 +343,25 @@ def get_recognizer_loss(recognizer_real_image, recognizer_decoded_image, recogni
     return q_loss
 
 
-def single_test(session, decoder, image_input, y_input, batch_size, epoch):
+def single_test(session, decoder, image_input, y_input, decoder_y_input, batch_size, epoch):
     x_training, y_training = get_training_set(batch_size)
-    generated_image = (session.run(decoder, feed_dict={image_input: x_training, y_input: y_training}))
+    generated_image = (session.run(decoder, feed_dict={image_input: x_training, y_input: y_training,
+                                                       decoder_y_input: y_training}))
     generated_image = (generated_image[0] + 1) / 2 * 255
     generated_image = np.uint8(generated_image)
     generated_image = np.clip(generated_image, 0, 255)
     io.imsave('results/epoch-' + str(epoch) + '.png', generated_image)
+
+
+def single_random_test(session, decoded_random, z_rand_input, y_input, decoder_y_input, batch_size, epoch):
+    _, y_training = get_training_set(batch_size)
+    sample = np.random.uniform(-1, 1, [batch_size, 256])
+    generated_image = (session.run(decoded_random, feed_dict={z_rand_input: sample, y_input: y_training,
+                                                              decoder_y_input: y_training}))
+    generated_image = (generated_image[0] + 1) / 2 * 255
+    generated_image = np.uint8(generated_image)
+    generated_image = np.clip(generated_image, 0, 255)
+    io.imsave('results/rand-epoch-' + str(epoch) + '.png', generated_image)
 
 
 def test(batch_size):
@@ -348,20 +396,87 @@ def test(batch_size):
                 plt.show()
 
 
+def gen_test(batch_size):
+    restored_graph = tf.Graph()
+    with restored_graph.as_default():
+        with tf.Session() as session:
+            tf.saved_model.loader.load(
+                session,
+                [tag_constants.SERVING],
+                'weights_bak/epoch-8/',
+            )
+
+            image_input = restored_graph.get_tensor_by_name('reconstruction_training_z_rand_input:0')
+            y_input = restored_graph.get_tensor_by_name('reconstruction_training_y_input:0')
+
+            decoder = restored_graph.get_tensor_by_name('generator_1/conv4/Tanh:0')
+
+            for i in range(10):
+                x_test, y_test = get_training_set(batch_size)
+                sample = np.random.uniform(-1, 1, [batch_size, 256])
+
+                generated_image = (session.run(decoder, feed_dict={image_input: sample, y_input: y_test}))
+                generated_image = (generated_image[0] + 1) / 2 * 255
+                generated_image = np.uint8(generated_image)
+                generated_image = np.clip(generated_image, 0, 255)
+                plt.imshow(generated_image)
+                plt.show()
+
+
+def mod_test(batch_size, weights):
+    restored_graph = tf.Graph()
+    with restored_graph.as_default():
+        with tf.Session() as session:
+            tf.saved_model.loader.load(
+                session,
+                [tag_constants.SERVING],
+                weights,
+            )
+
+            image_input = restored_graph.get_tensor_by_name('image_input:0')
+            y_input = restored_graph.get_tensor_by_name('y_input:0')
+            decoder_y_input = restored_graph.get_tensor_by_name('decoder_y_input:0')
+            decoder = restored_graph.get_tensor_by_name('generator/conv4/Tanh:0')
+
+            new_y = []
+            for i in range(10):
+	            temp_y = np.zeros(3)
+	            np.put(temp_y, [1], [1])
+	            new_y.append(temp_y)
+
+            for i in range(10):
+                x_test, y_test = get_training_set(batch_size)
+                generated_image = (session.run(decoder, feed_dict={image_input: x_test, y_input: y_test, decoder_y_input: new_y}))
+
+                f = plt.figure()
+                x_test = (x_test[0] + 1) / 2 * 255
+                x_test = np.uint8(x_test)
+                x_test = np.clip(x_test, 0, 255)
+                f.add_subplot(1,2, 1)
+                plt.imshow(x_test)
+
+                generated_image = (generated_image[0] + 1) / 2 * 255
+                generated_image = np.uint8(generated_image)
+                generated_image = np.clip(generated_image, 0, 255)
+                f.add_subplot(1,2, 2)
+                plt.imshow(generated_image)
+                plt.show()
+
+
 def get_training_set(load_amount):
     x_train = []
     y_train = []
     amount_loaded = 1
     while amount_loaded <= load_amount:
-        random_folder = random.randint(0, 9)
-        folder = "/home/ilias/Repositories/hairy_gan/Tenkind/" + str(random_folder)
+        random_folder = random.randint(0, 2)
+        folder = "/home/ilias/Repositories/hairy_gan/celeba-dataset/" + str(random_folder)
         files = os.listdir(folder)
         try:
             image = io.imread(os.path.join(folder, random.choice(files)))
             resized = transform.resize(image, (128, 128, 3))
             if resized.shape == (128, 128, 3):
                 x_train.append((resized - 0.5) * 2)
-                iter_y = np.zeros(10)
+                iter_y = np.zeros(3)
                 np.put(iter_y, [random_folder], [1])
                 y_train.append(iter_y)
                 amount_loaded += 1
@@ -375,4 +490,7 @@ def get_training_set(load_amount):
 
 if __name__ == "__main__":
     # train_reconstruction(10, 3000, 28)
-    test(10)
+    # continue_training(10, 3000, 400)
+    # test(10)
+    # gen_test(10)
+    mod_test(10, "weights/epoch-27")
