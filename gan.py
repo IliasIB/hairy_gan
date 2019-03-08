@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 from skimage import transform, io
 from sklearn.utils import shuffle
 from tensorflow.python.saved_model import tag_constants
+from argparse import ArgumentParser
+from inception_score import get_inception_score
 
 
 def encoder(image, attrs, num_attrs):
@@ -170,7 +172,7 @@ def recognizer(image, y_size):
     return y, f
 
 
-def train_reconstruction(batch_size, iteration_amount, epoch_amount):
+def train(batch_size, iteration_amount, epoch_amount, weights="weights"):
     # Prediction inputs
     image = tf.placeholder('float32', [None, 128, 128, 3], name="image_input")
     y_input = tf.placeholder('float32', [None, 3], name="y_input")
@@ -252,7 +254,7 @@ def train_reconstruction(batch_size, iteration_amount, epoch_amount):
                 "y_input_placeholder": y_input,
             }
             outputs = {"decoder": decoded_image}
-            tf.saved_model.simple_save(session, 'weights/epoch-' + str(epoch), inputs, outputs)
+            tf.saved_model.simple_save(session, weights + '/epoch-' + str(epoch), inputs, outputs)
 
 
 def continue_training(batch_size, iteration_amount, epoch_amount, weights="weights_bak/epoch-27"):
@@ -284,7 +286,8 @@ def continue_training(batch_size, iteration_amount, epoch_amount, weights="weigh
                     x_training, y_training = shuffle(x_training, y_training)
                     sample_z = np.random.uniform(-1, 1, [batch_size, 256])
                     _, _, _, _ = session.run([e_solver, g_solver, d_solver, q_solver],
-                                             feed_dict={image: x_training, y_input: y_training, z_rand_input: sample_z})
+                                             feed_dict={image: x_training, y_input: y_training, z_rand_input: sample_z,
+                                                        decoder_y_input: y_training})
                 single_test(session, decoded_image, image, y_input, decoder_y_input, batch_size, epoch)
                 single_random_test(session, decoded_random, z_rand_input, y_input, decoder_y_input, batch_size, epoch)
                 inputs = {
@@ -364,63 +367,74 @@ def single_random_test(session, decoded_random, z_rand_input, y_input, decoder_y
     io.imsave('results/rand-epoch-' + str(epoch) + '.png', generated_image)
 
 
-def test(batch_size):
+def test(batch_size, weights):
     restored_graph = tf.Graph()
     with restored_graph.as_default():
         with tf.Session() as session:
             tf.saved_model.loader.load(
                 session,
                 [tag_constants.SERVING],
-                'weights/epoch-5/',
+                weights,
             )
 
-            image_input = restored_graph.get_tensor_by_name('reconstruction_training_z_rand_input:0')
-            y_input = restored_graph.get_tensor_by_name('reconstruction_training_y_input:0')
+            image_input = restored_graph.get_tensor_by_name('image_input:0')
+            y_input = restored_graph.get_tensor_by_name('y_input:0')
+            decoder_y_input = restored_graph.get_tensor_by_name('decoder_y_input:0')
+            decoder = restored_graph.get_tensor_by_name('generator/conv4/Tanh:0')
 
-            decoder = restored_graph.get_tensor_by_name('generator_1/conv4/Tanh:0')
+            x_test, y_test = get_training_set(batch_size)
 
-            for i in range(10):
-                x_test, y_test = get_training_set(batch_size)
-                sample = np.random.uniform(-1, 1, [batch_size, 256])
+            generated_image = (session.run(decoder, feed_dict={image_input: x_test, y_input: y_test, decoder_y_input: y_test}))
+            generated_image = (generated_image[0] + 1) / 2 * 255
+            generated_image = np.uint8(generated_image)
+            generated_image = np.clip(generated_image, 0, 255)
+            x_test = (x_test[0] + 1) / 2 * 255
+            x_test = np.uint8(x_test)
+            x_test = np.clip(x_test, 0, 255)
 
-                generated_image = (session.run(decoder, feed_dict={image_input: sample, y_input: y_test}))
-                generated_image = (generated_image[0] + 1) / 2 * 255
-                generated_image = np.uint8(generated_image)
-                generated_image = np.clip(generated_image, 0, 255)
-                x_test = (x_test[0] + 1) / 2 * 255
-                x_test = np.uint8(x_test)
-                x_test = np.clip(x_test, 0, 255)
-                plt.imshow(x_test)
-                plt.show()
-                plt.imshow(generated_image)
-                plt.show()
+            f = plt.figure()
+            plt.title('Reconstruction Test', loc='center')
+            plt.xticks([])
+            plt.yticks([])
+            f.add_subplot(1,2, 1)
+            plt.xticks([])
+            plt.yticks([])
+            plt.imshow(x_test)
+            f.add_subplot(1,2, 2)
+            plt.xticks([])
+            plt.yticks([])
+            plt.imshow(generated_image)
+            plt.show()
 
 
-def gen_test(batch_size):
+def gen_test(batch_size, weights):
     restored_graph = tf.Graph()
     with restored_graph.as_default():
         with tf.Session() as session:
             tf.saved_model.loader.load(
                 session,
                 [tag_constants.SERVING],
-                'weights_bak/epoch-8/',
+                weights,
             )
 
-            image_input = restored_graph.get_tensor_by_name('reconstruction_training_z_rand_input:0')
-            y_input = restored_graph.get_tensor_by_name('reconstruction_training_y_input:0')
-
+            image_input = restored_graph.get_tensor_by_name('z_rand_input:0')
+            y_input = restored_graph.get_tensor_by_name('y_input:0')
+            decoder_y_input = restored_graph.get_tensor_by_name('decoder_y_input:0')
             decoder = restored_graph.get_tensor_by_name('generator_1/conv4/Tanh:0')
 
-            for i in range(10):
-                x_test, y_test = get_training_set(batch_size)
-                sample = np.random.uniform(-1, 1, [batch_size, 256])
+            x_test, y_test = get_training_set(batch_size)
+            sample = np.random.uniform(-1, 1, [batch_size, 256])
 
-                generated_image = (session.run(decoder, feed_dict={image_input: sample, y_input: y_test}))
-                generated_image = (generated_image[0] + 1) / 2 * 255
-                generated_image = np.uint8(generated_image)
-                generated_image = np.clip(generated_image, 0, 255)
-                plt.imshow(generated_image)
-                plt.show()
+            generated_image = (session.run(decoder, feed_dict={image_input: sample, y_input: y_test, decoder_y_input: y_test}))
+            generated_image = (generated_image[0] + 1) / 2 * 255
+            generated_image = np.uint8(generated_image)
+            generated_image = np.clip(generated_image, 0, 255)
+
+            plt.title('Generation Test')
+            plt.xticks([])
+            plt.yticks([])
+            plt.imshow(generated_image)
+            plt.show()
 
 
 def mod_test(batch_size, weights):
@@ -440,25 +454,180 @@ def mod_test(batch_size, weights):
 
             new_y = []
             for i in range(10):
-	            temp_y = np.zeros(3)
-	            np.put(temp_y, [1], [1])
-	            new_y.append(temp_y)
+                temp_y = np.zeros(3)
+                np.put(temp_y, [1], [1])
+                new_y.append(temp_y)
+
+            x_test, y_test = get_training_set(batch_size)
+            generated_image = (session.run(decoder, feed_dict={image_input: x_test, y_input: y_test, decoder_y_input: new_y}))
+
+            f = plt.figure()
+            plt.title('Modification Test', loc='center')
+            plt.xticks([])
+            plt.yticks([])
+            x_test = (x_test[0] + 1) / 2 * 255
+            x_test = np.uint8(x_test)
+            x_test = np.clip(x_test, 0, 255)
+            f.add_subplot(1,2, 1)
+            plt.xticks([])
+            plt.yticks([])
+            plt.imshow(x_test)
+
+            generated_image = (generated_image[0] + 1) / 2 * 255
+            generated_image = np.uint8(generated_image)
+            generated_image = np.clip(generated_image, 0, 255)
+            f.add_subplot(1,2, 2)
+            plt.xticks([])
+            plt.yticks([])
+            plt.imshow(generated_image)
+            plt.show()
+
+
+def inception_score(batch_size=10, weights="weights/epoch-27"):
+    generated_images = []
+    restored_graph = tf.Graph()
+    with restored_graph.as_default():
+        with tf.Session() as session:
+            tf.saved_model.loader.load(
+                session,
+                [tag_constants.SERVING],
+                weights,
+            )
+
+            image_input = restored_graph.get_tensor_by_name('z_rand_input:0')
+            y_input = restored_graph.get_tensor_by_name('y_input:0')
+            decoder_y_input = restored_graph.get_tensor_by_name('decoder_y_input:0')
+            decoder = restored_graph.get_tensor_by_name('generator_1/conv4/Tanh:0')
+
+            for i in range(64):
+                y_test = []
+                for i in range(batch_size):
+                    random_folder = random.randint(0, 2)
+                    iter_y = np.zeros(3)
+                    np.put(iter_y, [random_folder], [1])
+                    y_test.append(iter_y)
+                sample = np.random.uniform(-1, 1, [batch_size, 256])
+
+                generated_image = (session.run(decoder, feed_dict={image_input: sample, y_input: y_test,
+                                                                   decoder_y_input: y_test}))
+                if generated_images == []:
+                    generated_images = generated_image
+                else:
+                    generated_images = np.append(generated_images, generated_image, axis=0)
+                    generated_images = (generated_images + 1) / 2 * 255
+                    generated_images = np.uint8(generated_images)
+                    generated_images = np.clip(generated_images, 0, 255)
+    generated_images = np.reshape(generated_images, (generated_images.shape[0], 3, 128, 128))
+    print(get_inception_score(generated_images))
+
+
+def __color_to_enum(color):
+    if color == "black":
+        color = 0
+    elif color == "blonde":
+        color = 1
+    else:
+        color = 2
+    return color
+
+
+def change_hair_color(image, color, new_color, batch_size=10, weights="weights/epoch-27"):
+    color = __color_to_enum(color)
+    new_color = __color_to_enum(new_color)
+
+    restored_graph = tf.Graph()
+    with restored_graph.as_default():
+        with tf.Session() as session:
+            tf.saved_model.loader.load(
+                session,
+                [tag_constants.SERVING],
+                weights,
+            )
+
+            image_input = restored_graph.get_tensor_by_name('image_input:0')
+            y_input = restored_graph.get_tensor_by_name('y_input:0')
+            decoder_y_input = restored_graph.get_tensor_by_name('decoder_y_input:0')
+            decoder = restored_graph.get_tensor_by_name('generator/conv4/Tanh:0')
+
+            new_y = []
+            x_test = []
+            y_test = []
 
             for i in range(10):
-                x_test, y_test = get_training_set(batch_size)
-                generated_image = (session.run(decoder, feed_dict={image_input: x_test, y_input: y_test, decoder_y_input: new_y}))
+                temp_y = np.zeros(3)
+                np.put(temp_y, [new_color], [1])
+                new_y.append(temp_y)
 
+                read_image = io.imread(image)
+                resized = transform.resize(read_image, (128, 128, 3))
+                x_test.append((resized - 0.5) * 2)
+
+                iter_y = np.zeros(3)
+                np.put(iter_y, [color], [1])
+                y_test.append(iter_y)
+
+            generated_image = (session.run(decoder, feed_dict={image_input: x_test, y_input: y_test, decoder_y_input: new_y}))
+
+            f = plt.figure()
+            x_test = (x_test[0] + 1) / 2 * 255
+            x_test = np.uint8(x_test)
+            x_test = np.clip(x_test, 0, 255)
+            f.add_subplot(1, 2, 1)
+            plt.imshow(x_test)
+
+            generated_image = (generated_image[0] + 1) / 2 * 255
+            generated_image = np.uint8(generated_image)
+            generated_image = np.clip(generated_image, 0, 255)
+            f.add_subplot(1, 2, 2)
+            plt.imshow(generated_image)
+            plt.show()
+
+
+def multiple_mod_test(batch_size, new_color, weights):
+    new_color = __color_to_enum(new_color)
+    restored_graph = tf.Graph()
+    with restored_graph.as_default():
+        with tf.Session() as session:
+            tf.saved_model.loader.load(
+                session,
+                [tag_constants.SERVING],
+                weights,
+            )
+
+            image_input = restored_graph.get_tensor_by_name('image_input:0')
+            y_input = restored_graph.get_tensor_by_name('y_input:0')
+            decoder_y_input = restored_graph.get_tensor_by_name('decoder_y_input:0')
+            decoder = restored_graph.get_tensor_by_name('generator/conv4/Tanh:0')
+
+            new_y = []
+            for i in range(10):
+                temp_y = np.zeros(3)
+                np.put(temp_y, [new_color], [1])
+                new_y.append(temp_y)
+
+            x_tests, y_test = get_training_set(batch_size)
+            generated_images = (session.run(decoder, feed_dict={image_input: x_tests, y_input: y_test,
+                                                                decoder_y_input: new_y}))
+
+            for i in range(batch_size):
                 f = plt.figure()
-                x_test = (x_test[0] + 1) / 2 * 255
+                plt.title('Modification Test', loc='center')
+                plt.xticks([])
+                plt.yticks([])
+                x_test = (x_tests[i] + 1) / 2 * 255
                 x_test = np.uint8(x_test)
                 x_test = np.clip(x_test, 0, 255)
-                f.add_subplot(1,2, 1)
+                f.add_subplot(1, 2, 1)
+                plt.xticks([])
+                plt.yticks([])
                 plt.imshow(x_test)
 
-                generated_image = (generated_image[0] + 1) / 2 * 255
+                generated_image = (generated_images[i] + 1) / 2 * 255
                 generated_image = np.uint8(generated_image)
                 generated_image = np.clip(generated_image, 0, 255)
-                f.add_subplot(1,2, 2)
+                f.add_subplot(1, 2, 2)
+                plt.xticks([])
+                plt.yticks([])
                 plt.imshow(generated_image)
                 plt.show()
 
@@ -488,9 +657,95 @@ def get_training_set(load_amount):
     return np.array(x_train), np.array(y_train)
 
 
+parser = ArgumentParser(description='Change hair color of an image via a CVAEGAN.')
+parser.add_argument("-i", "--image", dest="image",
+                    help="Location of the image in JPEG format", metavar="IMAGE",
+                    type=str, default="")
+parser.add_argument("-t", "--train", dest="train",
+                    help="Trains the model",
+                    default=False, action='store_true')
+parser.add_argument("-mult", "--mult_test", dest="mult_test",
+                    help="Test multiple modifications",
+                    default=False, action='store_true')
+parser.add_argument("-test", "--testing", dest="test",
+                    help="Run construction, generation and modification tests",
+                    default=False, action='store_true')
+parser.add_argument("-score", "--inception_score", dest="test_score",
+                    help="Run inception_score",
+                    default=False, action='store_true')
+parser.add_argument("-c", "--continue", dest="cont",
+                    help="Continue training a model",
+                    default=False, action='store_true')
+parser.add_argument("-b", "--batch", dest="batch",
+                    help="The amount of batches to use", metavar="BATCH",
+                    type=int, default=10)
+parser.add_argument("-e", "--epoch", dest="epoch",
+                    help="The amount of epoch to train", metavar="EPOCH",
+                    type=int, default=28)
+parser.add_argument("-iter", "--iterations", dest="iterations",
+                    help="The amount of iterations to train", metavar="ITER",
+                    type=int, default=3000)
+parser.add_argument("-w", "--weights", dest="weights",
+                    help="The location of the weights", metavar="WEIGHT",
+                    type=str, default="")
+parser.add_argument("-col", "--color", dest="color",
+                    help="Trains the model", metavar="COLOR",
+                    type=str, default="")
+parser.add_argument("-or", "--original_color", dest="original_color",
+                    help="Trains the model", metavar="ORIGINAL_COLOR",
+                    type=str, default="")
+args = parser.parse_args()
+
+
 if __name__ == "__main__":
-    # train_reconstruction(10, 3000, 28)
+    if args.train:
+        if args.weights == "":
+            print("Please provide a location for the weights")
+        else:
+            print("Starting training...")
+            train(args.batch, args.iterations, args.epoch, args.weights)
+    elif args.test_score:
+        if args.weights == "":
+            print("Please provide a location for the weights")
+        else:
+            print("Testing inception score...")
+            inception_score(args.batch, args.weights)
+    elif args.cont:
+        if args.weights == "":
+            print("Please provide a location for the weights")
+        else:
+            print("Continuing training...")
+            continue_training(args.batch, args.iterations, args.epoch, args.weights)
+    elif args.test:
+        if args.weights == "":
+            print("Please provide a location for the weights")
+        else:
+            print("Starting tests...")
+            # test(args.batch, args.weights)
+            # gen_test(args.batch, args.weights)
+            mod_test(args.batch, args.weights)
+    elif args.mult_test:
+        if args.weights == "":
+            print("Please provide a location for the weights")
+        elif args.color == "":
+            print("Please provide the new hair color in the image")
+        else:
+            print("Starting multiple modification tests...")
+            # test(args.batch, args.weights)
+            # gen_test(args.batch, args.weights)
+            multiple_mod_test(args.batch, args.color, args.weights)
+    else:
+        if args.image == "":
+            print("Please provide the image location")
+        elif args.color == "":
+            print("Please provide the new hair color in the image")
+        elif args.original_color == "":
+            print("Please provide the hair color to change tp")
+        else:
+            change_hair_color(args.image, args.original_color, args.color)
+    # train(10, 3000, 28)
     # continue_training(10, 3000, 400)
     # test(10)
     # gen_test(10)
-    mod_test(10, "weights/epoch-27")
+    # mod_test(10, "weights/epoch-27")
+    # change_hair_color("zimcke.jpg", "blonde", "black")
